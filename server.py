@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Chartink MCP Server
-Uses browser session cookies to run screeners on Chartink.
+Runs screeners on Chartink using an anonymous session (auto-renewed on expiry).
+Browser cookies via set_cookies are optional, only for login-only features.
 """
 
 import json
@@ -51,40 +52,36 @@ def _get_xsrf_token() -> str:
     return unquote(token)
 
 
-def _post_screener(scan_clause: str, max_rows: int = 160, referer: str = f"{BASE_URL}/screeners/") -> dict:
-    xsrf = _get_xsrf_token()
-    headers = {
-        "content-type": "application/x-www-form-urlencoded",
-        "x-xsrf-token": xsrf,
-        "referer": referer,
-        "origin": BASE_URL,
-    }
-    resp = _session.post(
-        SCREENER_PROCESS,
-        data={"max_rows": max_rows, "scan_clause": scan_clause},
-        headers=headers,
-        timeout=30,
-    )
+def _post_process(endpoint: str, scan_clause: str, max_rows: int, referer: str) -> dict:
+    """POST a scan clause. No login needed: an anonymous Chartink session is
+    fetched automatically. If the session has expired (HTTP 401/419, e.g. CSRF
+    token mismatch, or after logging out of Chartink), the stale cookies are
+    dropped, a fresh anonymous session is fetched, and the request is retried once."""
+    data = {"max_rows": max_rows, "scan_clause": scan_clause}
+
+    def _send() -> requests.Response:
+        headers = {
+            "content-type": "application/x-www-form-urlencoded",
+            "x-xsrf-token": _get_xsrf_token(),
+            "referer": referer,
+            "origin": BASE_URL,
+        }
+        return _session.post(endpoint, data=data, headers=headers, timeout=30)
+
+    resp = _send()
+    if resp.status_code in (401, 419):
+        _session.cookies.clear()
+        resp = _send()
     resp.raise_for_status()
     return resp.json()
+
+
+def _post_screener(scan_clause: str, max_rows: int = 160, referer: str = f"{BASE_URL}/screeners/") -> dict:
+    return _post_process(SCREENER_PROCESS, scan_clause, max_rows, referer)
 
 
 def _post_backtest(scan_clause: str, max_rows: int = 160, referer: str = f"{BASE_URL}/screeners/") -> dict:
-    xsrf = _get_xsrf_token()
-    headers = {
-        "content-type": "application/x-www-form-urlencoded",
-        "x-xsrf-token": xsrf,
-        "referer": referer,
-        "origin": BASE_URL,
-    }
-    resp = _session.post(
-        BACKTEST_PROCESS,
-        data={"max_rows": max_rows, "scan_clause": scan_clause},
-        headers=headers,
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    return _post_process(BACKTEST_PROCESS, scan_clause, max_rows, referer)
 
 
 @app.list_tools()
@@ -93,9 +90,10 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="set_cookies",
             description=(
-                "Set your Chartink browser session cookies so the server can make "
-                "authenticated requests. Paste the raw Cookie header string from "
-                "Chrome DevTools → Network → any chartink.com request → Headers → Cookie."
+                "OPTIONAL. Not needed for normal scans — the server uses an anonymous "
+                "Chartink session automatically. Only use this to access login-only "
+                "features (private saved screeners, premium). Paste the raw Cookie header "
+                "string from Chrome DevTools → Network → any chartink.com request → Headers → Cookie."
             ),
             inputSchema={
                 "type": "object",
@@ -113,7 +111,7 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Run a Chartink screener scan clause and return matching stocks. "
                 "Uses the /screener/process endpoint. "
-                "Requires cookies to be set first via set_cookies."
+                "No login or cookies needed; the session is renewed automatically."
             ),
             inputSchema={
                 "type": "object",
@@ -165,7 +163,7 @@ async def list_tools() -> list[Tool]:
             name="run_backtest",
             description=(
                 "Run a Chartink backtest scan clause using the /backtest/process endpoint. "
-                "Requires cookies to be set first via set_cookies."
+                "No cookies needed for basic use; full target/stop backtests may need a premium login."
             ),
             inputSchema={
                 "type": "object",
